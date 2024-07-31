@@ -1,0 +1,10 @@
+{
+  "births": 1451,
+  "deaths": 337,
+  "recoveries": 19804,
+  "contacts": 138489,
+  "wanings": 9480,
+  "reassortments": 43,
+  "vaccine_dose_1_wanings": 345,
+  "vaccine_dose_2_wanings": 508
+}
