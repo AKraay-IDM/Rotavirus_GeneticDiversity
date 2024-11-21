@@ -114,14 +114,6 @@ class Host(sc.prettyobj):
         max_infection_times = max([self.t - p.creation_time for p in self.infecting_pathogen])
         return max_infection_times
 
-    # def get_oldest_infection(self):
-    #     # max_infection_times = max([self.t - p for p in self.immunity.values()])
-    #     try:
-    #         oldest_infection = next(iter(self.immunity.values()))
-    #     except:
-    #         oldest_infection = np.nan
-    #     return oldest_infection
-
     def compute_combinations(self):
         seg_combinations = []
 
@@ -646,6 +638,7 @@ class RotaABM:
             N = 100_000,
             timelimit = 40,
             verbose = None,
+            to_csv = True,
             **kwargs,
         ):
         """
@@ -659,12 +652,13 @@ class RotaABM:
         args = sc.objdict(
             immunity_hypothesis = 1,
             reassortment_rate = 0.1,
-            fitness_hypothesis = 1,
+            fitness_hypothesis = 2,
             vaccine_hypothesis = 1,
             waning_hypothesis = 1,
             initial_immunity = 0,
             ve_i_to_ve_s_ratio = 0.5,
             experiment_number = 1,
+            rel_beta = 1.0,
         )
 
         # Update with any keyword arguments
@@ -691,6 +685,7 @@ class RotaABM:
         self.initial_immunity = int(args[5]) # 0 = no immunity
         self.ve_i_to_ve_s_ratio = float(args[6])
         self.experiment_number = int(args[7])
+        self.rel_beta = float(args[8])
         self.verbose = verbose
 
         # Reset the seed
@@ -709,6 +704,7 @@ class RotaABM:
         self.files.sample_vaccine_efficacy_output_filename = './results/rota_sample_vaccine_efficacy_%s.csv' % (name_suffix)
 
         # Set other parameters
+        self.to_csv = to_csv # whether to write files
         self.N = N  # initial population size
         self.timelimit = timelimit  # simulation years
         self.mu = 1.0/70.0     # average life span is 70 years
@@ -755,6 +751,10 @@ class RotaABM:
         self.reassortment_count = 0
         self.pop_id = 0
         self.t = 0.0
+        self.results = sc.objdict(
+            columns = ["id", "Strain", "CollectionTime", "Age", "Severity", "InfectionTime", "PopulationSize"],
+            infected_all = [],
+        )
 
         return
 
@@ -851,6 +851,14 @@ class RotaABM:
         rnd_nums = np.random.random(size=contacts)
         counter = 0
 
+        # based on prior infections and current infections, the relative risk of subsequent infections
+        infecting_probability_map = {
+            0: 1,
+            1: 0.61,
+            2: 0.48,
+            3: 0.33,
+        }
+
         for h1_ind, h2_ind, rnd_num in zip(h1_inds, h2_inds, rnd_nums):
             h1 = infected_pop[h1_ind]
             h2 = self.host_pop[h2_ind]
@@ -858,15 +866,8 @@ class RotaABM:
             while h1 == h2:
                 h2 = rnd.choice(self.host_pop)
 
-            # based on prior infections and current infections, the relative risk of subsequent infections
-            # number_of_current_infections = 0 # Note: not used
-            infecting_probability_map = {
-                0: 1,
-                1: 0.61,
-                2: 0.48,
-                3: 0.33,
-            }
             infecting_probability = infecting_probability_map.get(h2.prior_infections, 0)
+            infecting_probability *= self.rel_beta # Scale by this calibration parameter
 
             # No infection occurs
             if rnd_num > infecting_probability:
@@ -1020,6 +1021,8 @@ class RotaABM:
         - sample: Boolean indicating whether to collect data from a sample or the entire population.
         - sample_size: Size of the sample to collect data from if sample is True.
         """
+
+
         # Select the population to collect data from
         if sample:
             population_to_collect = np.random.choice(self.host_pop, sample_size, replace=False)
@@ -1112,27 +1115,23 @@ class RotaABM:
                 if was_there_a_severe_infection:
                     num_unvaccinated_infected_severe += 1
 
-            with open(vaccine_efficacy_output_filename, "a", newline='') as outputfile:
-                write = csv.writer(outputfile)
-                write.writerow([self.t, num_vaccinated, num_unvaccinated, num_vaccinated_infected, num_vaccinated_infected_severe, num_unvaccinated_infected, num_unvaccinated_infected_severe,
-                                num_homotypic[0], num_homotypic[1], num_partial_heterotypic[0], num_partial_heterotypic[1], num_full_heterotypic[0], num_full_heterotypic[1]])
+            if self.to_csv:
+                with open(vaccine_efficacy_output_filename, "a", newline='') as outputfile:
+                    write = csv.writer(outputfile)
+                    write.writerow([self.t, num_vaccinated, num_unvaccinated, num_vaccinated_infected, num_vaccinated_infected_severe, num_unvaccinated_infected, num_unvaccinated_infected_severe,
+                                    num_homotypic[0], num_homotypic[1], num_partial_heterotypic[0], num_partial_heterotypic[1], num_full_heterotypic[0], num_full_heterotypic[1]])
 
         # Write collected data to the output file
-        with open(output_filename, "a", newline='') as outputfile:
-            writer = csv.writer(outputfile)
-            writer.writerows(collected_data)
-        if not sample:
-            with open(vaccine_output_filename, "a", newline='') as outputfile:
+        if self.to_csv:
+            with open(output_filename, "a", newline='') as outputfile:
                 writer = csv.writer(outputfile)
-                writer.writerows(collected_vaccination_data)
-
-    def run(self):
-        """
-        Run the simulation
-        """
-        self.prepare_run()
-        events = self.integrate()
-        return events
+                writer.writerows(collected_data)
+        if not sample:
+            self.results.infected_all.extend(collected_data)
+            if self.to_csv:
+                with open(vaccine_output_filename, "a", newline='') as outputfile:
+                    writer = csv.writer(outputfile)
+                    writer.writerows(collected_vaccination_data)
 
     def prepare_run(self):
         """
@@ -1273,7 +1272,8 @@ class RotaABM:
                 strain_count[p.strain] += 1
         if self.verbose: print(strain_count)
 
-        self.initialize_files(strain_count)
+        if self.to_csv:
+            self.initialize_files(strain_count)
 
         self.tau_steps = 0
         self.last_data_colllected = 0
@@ -1322,9 +1322,10 @@ class RotaABM:
                 for h in host_pop:
                     age_dict[h.get_age_category()] += 1
                 if self.verbose: print("Ages: ", age_dict)
-                with open(self.files.age_outputfilename, "a", newline='') as outputfile:
-                    write = csv.writer(outputfile)
-                    write.writerow(["{:.2}".format(self.t)] + list(age_dict.values()))
+                if self.to_csv:
+                    with open(self.files.age_outputfilename, "a", newline='') as outputfile:
+                        write = csv.writer(outputfile)
+                        write.writerow(["{:.2}".format(self.t)] + list(age_dict.values()))
 
             # Count the number of hosts with 1 or 2 vaccinations
             single_dose_hosts = []
@@ -1348,7 +1349,6 @@ class RotaABM:
             self.birth_events(births)
             self.reassortment_event(infected_pop, reassortments) # calling the function
             counter = self.contact_event(contacts, infected_pop, strain_count)
-            # print(f'CKDEBUG: {counter}')
             self.death_event(deaths, infected_pop, strain_count)
             self.recovery_event(recoveries, infected_pop, strain_count)
             self.waning_event(wanings)
@@ -1402,9 +1402,10 @@ class RotaABM:
                 self.collect_and_write_data(f.infected_all_outputfilename, f.vaccinations_outputfilename, f.vaccine_efficacy_output_filename, sample=False)
                 self.last_data_colllected += self.data_collection_rate
 
-            with open(f.outputfilename, "a", newline='') as outputfile:
-                write = csv.writer(outputfile)
-                write.writerow([self.t] + list(strain_count.values()) + [self.reassortment_count])
+            if self.to_csv:
+                with open(f.outputfilename, "a", newline='') as outputfile:
+                    write = csv.writer(outputfile)
+                    write.writerow([self.t] + list(strain_count.values()) + [self.reassortment_count])
 
             self.tau_steps += 1
             self.t += self.tau
@@ -1414,8 +1415,25 @@ class RotaABM:
             print(self.event_dict)
         return self.event_dict
 
+    def to_df(self):
+        """ Convert results to a dataframe """
+        cols = self.results.columns
+        res = self.results.infected_all
+        df = sc.dataframe(data=res, columns=cols)
+        self.df = df
+        return df
+
+    def run(self):
+        """
+        Run the simulation
+        """
+        self.prepare_run()
+        events = self.integrate()
+        self.to_df()
+        return events
+
 
 if __name__ == '__main__':
-    rota = RotaABM(N=100_000, timelimit=2)
+    rota = RotaABM(N=10_000, timelimit=2)
     events = rota.run()
 
